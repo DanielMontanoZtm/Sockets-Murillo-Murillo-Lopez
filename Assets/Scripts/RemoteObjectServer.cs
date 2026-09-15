@@ -89,6 +89,13 @@ public class RemoteObjectServer : MonoBehaviour
         connectedClient?.Close();
         connectedClient = client;
 
+        try
+        {
+            string clientIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString();
+            incomingLines.Enqueue($"__CLIENT_CONNECTED__:{clientIp}");
+        }
+        catch (Exception) { }
+
         readThread = new Thread(() => ReadLoop(client));
         readThread.IsBackground = true;
         readThread.Start();
@@ -100,23 +107,34 @@ public class RemoteObjectServer : MonoBehaviour
         byte[] buffer = new byte[1024];
         StringBuilder pendingText = new StringBuilder();
 
-        while (running && client.Connected)
+        try
         {
-            int count = stream.Read(buffer, 0, buffer.Length);
-            if (count == 0)
-                break;
+            while (running && client.Connected)
+            {
+                int count = stream.Read(buffer, 0, buffer.Length);
+                if (count == 0)
+                    break;
 
-            string chunk = Encoding.UTF8.GetString(buffer, 0, count);
-            pendingText.Append(chunk);
+                string chunk = Encoding.UTF8.GetString(buffer, 0, count);
+                pendingText.Append(chunk);
 
-            string text = pendingText.ToString();
-            string[] lines = text.Split('\n');
+                string text = pendingText.ToString();
+                string[] lines = text.Split('\n');
 
-            for (int i = 0; i < lines.Length - 1; i++)
-                incomingLines.Enqueue(lines[i]);
+                for (int i = 0; i < lines.Length - 1; i++)
+                    incomingLines.Enqueue(lines[i]);
 
-            pendingText.Clear();
-            pendingText.Append(lines[lines.Length - 1]);
+                pendingText.Clear();
+                pendingText.Append(lines[lines.Length - 1]);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.Log($"Conexión con cliente finalizada: {ex.Message}");
+        }
+        finally
+        {
+            incomingLines.Enqueue("__DISCONNECT__");
         }
     }
 
@@ -124,16 +142,43 @@ public class RemoteObjectServer : MonoBehaviour
     {
         while (incomingLines.TryDequeue(out string line))
         {
-            RemoteControlMessage message = JsonUtility.FromJson<RemoteControlMessage>(line);
-            currentInput.x = Mathf.Clamp(message.x, -1f, 1f);
-            currentInput.z = Mathf.Clamp(message.z, -1f, 1f);
-            currentInput.yaw = Mathf.Clamp(message.yaw, -1f, 1f);
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
 
-            if (message.grab)
-                TryGrab();
+            if (line.StartsWith("__CLIENT_CONNECTED__:"))
+            {
+                string ip = line.Substring("__CLIENT_CONNECTED__:".Length);
+                WriteStatus($"Cliente conectado desde: {ip}");
+                continue;
+            }
 
-            if (message.release)
-                Release();
+            if (line == "__DISCONNECT__")
+            {
+                currentInput = new RemoteControlMessage();
+                WriteStatus($"Cliente desconectado. Esperando en {GetBestIPv4()}:{port}");
+                continue;
+            }
+
+            try
+            {
+                RemoteControlMessage message = JsonUtility.FromJson<RemoteControlMessage>(line);
+                if (message != null)
+                {
+                    currentInput.x = Mathf.Clamp(message.x, -1f, 1f);
+                    currentInput.z = Mathf.Clamp(message.z, -1f, 1f);
+                    currentInput.yaw = Mathf.Clamp(message.yaw, -1f, 1f);
+
+                    if (message.grab)
+                        TryGrab();
+
+                    if (message.release)
+                        Release();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"Error al procesar mensaje JSON: {ex.Message}");
+            }
         }
 
         ApplyMovement();
